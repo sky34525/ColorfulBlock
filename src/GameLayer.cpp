@@ -36,6 +36,8 @@ void GameLayer::ResetGame()
 	m_SpawnInterval = 1.5f;
 	m_Distance      = 0.0f;
 	m_FlashTimer    = 0.0f;
+	m_BoostLocked   = false;
+	m_Score         = 0;
 }
 
 // -------------------------------------------------------------------------
@@ -123,9 +125,20 @@ void GameLayer::UpdatePlaying(float dt)
 	m_Player.HSpeed = glm::min(m_Player.HSpeed + HAccel * dt, HSpeedMax);
 
 	// --- 空格加速（消耗能量，只影响垂直速度）---
-	bool boosting = LI::Input::IsKeyPressed(LI_KEY_SPACE) && m_Player.Energy > 0.0f;
+	// 能量耗尽后锁定，必须恢复到 20 才能再次激活，防止微量能量触发闪烁加速
+	static constexpr float BoostUnlockThreshold = 20.0f;
+	if (m_BoostLocked && m_Player.Energy >= BoostUnlockThreshold)
+		m_BoostLocked = false;
+
+	bool wantBoost = LI::Input::IsKeyPressed(LI_KEY_SPACE);
+	bool boosting  = wantBoost && !m_BoostLocked && m_Player.Energy > 0.0f;
+
 	if (boosting)
+	{
 		m_Player.Energy = glm::max(0.0f, m_Player.Energy - EnergyDrain * dt);
+		if (m_Player.Energy <= 0.0f)
+			m_BoostLocked = true;
+	}
 	else
 		m_Player.Energy = glm::min(MaxEnergy, m_Player.Energy + EnergyRegen * dt);
 
@@ -175,22 +188,34 @@ void GameLayer::SpawnObstacles(float dt)
 	float spawnX    = m_Player.Position.x + HalfW + 2.0f;
 	float blockW    = wDist(s_Rng);
 
+	// 随机选择颜色（黑 / 黄 / 蓝），同一列上下两块颜色相同
+	std::uniform_int_distribution<int> colorDist(0, 2);
+	BlockColor blockColor = static_cast<BlockColor>(colorDist(s_Rng));
+	glm::vec4 renderColor;
+	switch (blockColor) {
+		case BlockColor::Yellow: renderColor = { 1.0f, 0.85f, 0.0f, 1.0f }; break;
+		case BlockColor::Blue:   renderColor = { 0.1f, 0.45f, 1.0f, 1.0f }; break;
+		default:                 renderColor = { 0.1f, 0.1f,  0.1f, 1.0f }; break;
+	}
+
 	float topEdge = gapCenter + gapSize * 0.5f;
 	float topH    = HalfH - topEdge;
 	Obstacle top;
-	top.Position = { spawnX, HalfH - topH * 0.5f };
-	top.Size     = { blockW, topH };
-	top.Type     = ObstacleType::Death;
-	top.Color    = { 0.0f, 0.0f, 0.0f, 1.0f };
+	top.Position  = { spawnX, HalfH - topH * 0.5f };
+	top.Size      = { blockW, topH };
+	top.Type      = ObstacleType::Death;
+	top.ColorType = blockColor;
+	top.Color     = renderColor;
 	m_Obstacles.push_back(top);
 
 	float botEdge = gapCenter - gapSize * 0.5f;
 	float botH    = HalfH + botEdge;
 	Obstacle bot;
-	bot.Position = { spawnX, -HalfH + botH * 0.5f };
-	bot.Size     = { blockW, botH };
-	bot.Type     = ObstacleType::Death;
-	bot.Color    = { 0.0f, 0.0f, 0.0f, 1.0f };
+	bot.Position  = { spawnX, -HalfH + botH * 0.5f };
+	bot.Size      = { blockW, botH };
+	bot.Type      = ObstacleType::Death;
+	bot.ColorType = blockColor;
+	bot.Color     = renderColor;
 	m_Obstacles.push_back(bot);
 }
 
@@ -199,17 +224,34 @@ void GameLayer::CheckCollisions()
 	float px  = m_Player.Position.x, py  = m_Player.Position.y;
 	float phw = m_Player.Size.x * 0.5f, phh = m_Player.Size.y * 0.5f;
 
-	for (const auto& ob : m_Obstacles)
+	for (auto& ob : m_Obstacles)
 	{
 		float ohw = ob.Size.x * 0.5f, ohh = ob.Size.y * 0.5f;
 		bool hit = px + phw > ob.Position.x - ohw &&
 		           px - phw < ob.Position.x + ohw &&
 		           py + phh > ob.Position.y - ohh &&
 		           py - phh < ob.Position.y + ohh;
-		if (hit)
+		if (!hit) continue;
+
+		// 判断颜色是否匹配（黑色始终死亡）
+		bool sameColor =
+			(ob.ColorType == BlockColor::Yellow && m_Player.ColorIndex == PlayerColor::Yellow) ||
+			(ob.ColorType == BlockColor::Blue   && m_Player.ColorIndex == PlayerColor::Blue);
+
+		if (sameColor)
 		{
+			// 同色：得分（每块只计一次）
+			if (!ob.Scored)
+			{
+				ob.Scored = true;
+				m_Score++;
+			}
+		}
+		else
+		{
+			// 异色或黑色：死亡
 			m_State      = GameState::GameOver;
-			m_FlashTimer = 1.0f;  // 触发红屏
+			m_FlashTimer = 1.0f;
 			return;
 		}
 	}
@@ -227,7 +269,7 @@ void GameLayer::RenderScene()
 	for (const auto& ob : m_Obstacles)
 		LI::Renderer2D::DrawQuad(ob.Position, ob.Size, ob.Color);
 
-	LI::Renderer2D::DrawQuad(m_Player.Position, m_Player.Size, m_Player.Color);
+	LI::Renderer2D::DrawQuad(m_Player.Position, m_Player.Size, m_Player.GetColor());
 
 	// --- 能量条（跟随相机，固定在画面底部）---
 	float camCenterX  = m_Player.Position.x + HalfW * 0.2f;
@@ -236,19 +278,23 @@ void GameLayer::RenderScene()
 	float barY        = -HalfH + barHeight * 0.5f + 0.1f;
 
 	float energyRatio = m_Player.Energy / MaxEnergy;
-	float barWidth    = barMaxWidth * energyRatio;
+	float greenWidth  = barMaxWidth * energyRatio;
+	float grayWidth   = barMaxWidth * (1.0f - energyRatio);
+	float barLeft     = camCenterX - barMaxWidth * 0.5f;
 
-	// 背景（灰色）
-	LI::Renderer2D::DrawQuad({ camCenterX, barY },
-		{ barMaxWidth, barHeight }, { 0.3f, 0.3f, 0.3f, 1.0f });
+	// 绿色段（已有能量，左侧）
+	if (greenWidth > 0.0f)
+		LI::Renderer2D::DrawQuad(
+			{ barLeft + greenWidth * 0.5f, barY },
+			{ greenWidth, barHeight },
+			{ 0.2f, 0.9f, 0.3f, 1.0f });
 
-	// 前景（黄绿色，从左对齐）
-	if (barWidth > 0.0f)
-	{
-		float barLeft = camCenterX - barMaxWidth * 0.5f;
-		LI::Renderer2D::DrawQuad({ barLeft + barWidth * 0.5f, barY },
-			{ barWidth, barHeight }, { 0.2f, 0.9f, 0.3f, 1.0f });
-	}
+	// 灰色段（已消耗能量，右侧）
+	if (grayWidth > 0.0f)
+		LI::Renderer2D::DrawQuad(
+			{ barLeft + greenWidth + grayWidth * 0.5f, barY },
+			{ grayWidth, barHeight },
+			{ 0.3f, 0.3f, 0.3f, 1.0f });
 
 	LI::Renderer2D::EndScene();
 }
@@ -300,6 +346,16 @@ bool GameLayer::OnKeyPressed(LI::KeyPressedEvent& e)
 	{
 		ResetGame();
 		m_State = GameState::Playing;
+		return true;
+	}
+	if (e.GetKeyCode() == LI_KEY_LEFT_SHIFT || e.GetKeyCode() == LI_KEY_RIGHT_SHIFT)
+	{
+		if (m_State == GameState::Playing)
+		{
+			m_Player.ColorIndex = (m_Player.ColorIndex == PlayerColor::Yellow)
+				? PlayerColor::Blue
+				: PlayerColor::Yellow;
+		}
 		return true;
 	}
 	return false;
