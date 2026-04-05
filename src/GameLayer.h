@@ -83,6 +83,8 @@ private:
 	float m_Distance      = 0.0f;
 	int   m_Score         = 0;
 
+	LI::Ref<LI::Font> m_Font;
+
 	// 后处理
 	LI::Ref<LI::Framebuffer> m_Framebuffer;
 	LI::Ref<LI::Shader>      m_PostShader;

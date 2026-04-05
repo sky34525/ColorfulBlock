@@ -18,6 +18,7 @@ GameLayer::GameLayer()
 void GameLayer::OnAttach()
 {
 	LI::Renderer2D::Init();
+	m_Font = LI::Font::Create("assets/fonts/OpenSans-VariableFont_wdth,wght.ttf", 48);
 	InitPostProcess();
 	ResetGame();
 	m_State = GameState::Playing;
@@ -295,6 +296,22 @@ void GameLayer::RenderScene()
 			{ barLeft + greenWidth + grayWidth * 0.5f, barY },
 			{ grayWidth, barHeight },
 			{ 0.3f, 0.3f, 0.3f, 1.0f });
+
+	// --- 右上角分数（跟随相机，固定在画面右上方）---
+	if (m_Font)
+	{
+		std::string scoreStr = "Score: " + std::to_string(m_Score);
+		float textH = 0.55f;  // 文字高度（世界坐标）
+		float textW = LI::TextRenderer::MeasureWidth(scoreStr, textH, m_Font);
+		float textX = camCenterX + HalfW - textW - 0.2f;  // 右对齐，留 0.2 边距
+		float textY = HalfH - textH - 0.15f;               // 顶部留 0.15 边距
+
+		LI::TextRenderer::DrawText(scoreStr,
+			{ textX, textY },
+			textH,
+			{ 1.0f, 1.0f, 1.0f, 1.0f },
+			m_Font);
+	}
 
 	LI::Renderer2D::EndScene();
 }
